@@ -1,6 +1,9 @@
+import json
+import pickle
 import re
 from pathlib import Path
 from bs4 import BeautifulSoup
+from rank_bm25 import BM25Okapi
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -101,7 +104,21 @@ def build_index():
 
     VECTORSTORE_DIR.mkdir(exist_ok=True)
     vectorstore.save_local(str(VECTORSTORE_DIR))
-    print(f"FAISS index saved to {VECTORSTORE_DIR}/")
+
+    # Save chunks for BM25
+    chunks_data = [
+        {"content": c.page_content, "metadata": c.metadata} for c in chunks
+    ]
+    with open(VECTORSTORE_DIR / "chunks.json", "w") as f:
+        json.dump(chunks_data, f)
+
+    # Pre-build and pickle BM25 index so cold start is instant
+    tokenized = [c.page_content.lower().split() for c in chunks]
+    bm25 = BM25Okapi(tokenized)
+    with open(VECTORSTORE_DIR / "bm25.pkl", "wb") as f:
+        pickle.dump(bm25, f)
+
+    print(f"FAISS + BM25 + chunks saved to {VECTORSTORE_DIR}/")
 
 
 if __name__ == "__main__":
