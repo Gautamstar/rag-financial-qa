@@ -1,3 +1,4 @@
+import json
 import re
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -101,7 +102,15 @@ def build_index():
 
     VECTORSTORE_DIR.mkdir(exist_ok=True)
     vectorstore.save_local(str(VECTORSTORE_DIR))
-    print(f"FAISS index saved to {VECTORSTORE_DIR}/")
+
+    # Save chunks for BM25 index
+    chunks_data = [
+        {"content": c.page_content, "metadata": c.metadata} for c in chunks
+    ]
+    with open(VECTORSTORE_DIR / "chunks.json", "w") as f:
+        json.dump(chunks_data, f)
+
+    print(f"FAISS index + chunks saved to {VECTORSTORE_DIR}/")
 
 
 if __name__ == "__main__":
