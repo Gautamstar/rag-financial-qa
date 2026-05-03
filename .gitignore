@@ -1,0 +1,24 @@
+# Environment
+.env
+
+# Dataset and generated files
+data/
+vectorstore/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
