@@ -1,5 +1,7 @@
+import hashlib
 import json
 import os
+import pickle
 from pathlib import Path
 from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
@@ -13,10 +15,25 @@ from langchain_core.documents import Document
 load_dotenv()
 
 VECTORSTORE_DIR = Path("vectorstore")
+BM25_CACHE = VECTORSTORE_DIR / "bm25.pkl"
 LM_STUDIO_URL = os.getenv("LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
 LM_STUDIO_MODEL = os.getenv("LM_STUDIO_MODEL", "google/gemma-4-26b-a4b")
 TOP_K = 4
 RRF_K = 60
+
+# Maps common company names to their tickers for better BM25 matching
+COMPANY_ALIASES = {
+    "jpmorgan": "jpm",
+    "jp morgan": "jpm",
+    "jpmorgan chase": "jpm",
+    "goldman sachs": "gs",
+    "goldman": "gs",
+    "metlife": "met",
+    "prudential": "pru",
+    "prudential financial": "pru",
+    "aig": "aig",
+    "american international group": "aig",
+}
 
 _PROMPT = PromptTemplate(
     input_variables=["context", "question"],
@@ -37,6 +54,19 @@ _bm25_docs = None
 _llm_chain = None
 
 
+def _normalize_query(question: str) -> str:
+    """Expand company names to tickers so BM25 matches filing text."""
+    q = question.lower()
+    for name, ticker in COMPANY_ALIASES.items():
+        if name in q:
+            q = q + " " + ticker
+    return q
+
+
+def _doc_key(doc: Document) -> str:
+    return hashlib.md5(doc.page_content.encode()).hexdigest()
+
+
 def _load():
     global _faiss, _bm25, _bm25_docs, _llm_chain
     if _llm_chain is not None:
@@ -50,8 +80,15 @@ def _load():
     with open(VECTORSTORE_DIR / "chunks.json") as f:
         raw = json.load(f)
     _bm25_docs = [Document(page_content=c["content"], metadata=c["metadata"]) for c in raw]
-    tokenized = [doc.page_content.lower().split() for doc in _bm25_docs]
-    _bm25 = BM25Okapi(tokenized)
+
+    if BM25_CACHE.exists():
+        with open(BM25_CACHE, "rb") as f:
+            _bm25 = pickle.load(f)
+    else:
+        tokenized = [doc.page_content.lower().split() for doc in _bm25_docs]
+        _bm25 = BM25Okapi(tokenized)
+        with open(BM25_CACHE, "wb") as f:
+            pickle.dump(_bm25, f)
 
     llm = ChatOpenAI(
         base_url=LM_STUDIO_URL,
@@ -65,26 +102,36 @@ def _load():
 def _hybrid_retrieve(question: str, k: int = TOP_K) -> list[Document]:
     """Reciprocal Rank Fusion over FAISS (semantic) + BM25 (keyword) results."""
     n_candidates = k * 10
+    normalized = _normalize_query(question)
 
     faiss_results = _faiss.similarity_search(question, k=n_candidates)
+    for doc in faiss_results:
+        doc.metadata["_retriever"] = "FAISS"
 
-    tokens = question.lower().split()
+    tokens = normalized.lower().split()
     bm25_scores = _bm25.get_scores(tokens)
     bm25_top_idx = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:n_candidates]
     bm25_results = [_bm25_docs[i] for i in bm25_top_idx]
+    for doc in bm25_results:
+        doc.metadata["_retriever"] = "BM25"
 
     rrf_scores: dict[str, float] = {}
     doc_map: dict[str, Document] = {}
 
     for rank, doc in enumerate(faiss_results):
-        key = doc.page_content[:200]
+        key = _doc_key(doc)
+        if key not in rrf_scores:
+            doc_map[key] = doc
         rrf_scores[key] = rrf_scores.get(key, 0) + 1 / (RRF_K + rank + 1)
-        doc_map[key] = doc
 
     for rank, doc in enumerate(bm25_results):
-        key = doc.page_content[:200]
+        key = _doc_key(doc)
+        if key in rrf_scores:
+            # Already found by FAISS — tag as both
+            doc_map[key].metadata["_retriever"] = "FAISS+BM25"
+        else:
+            doc_map[key] = doc
         rrf_scores[key] = rrf_scores.get(key, 0) + 1 / (RRF_K + rank + 1)
-        doc_map[key] = doc
 
     ranked = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
     return [doc_map[key] for key in ranked[:k]]
@@ -94,13 +141,19 @@ def _format_docs(docs: list[Document]) -> str:
     return "\n\n".join(doc.page_content for doc in docs)
 
 
+def _source_label(doc: Document) -> str:
+    source = doc.metadata.get("source", doc.metadata.get("filename", ""))
+    retriever = doc.metadata.get("_retriever", "")
+    return f"{source} [{retriever}]" if retriever else source
+
+
 def retrieve(question: str) -> dict:
     _load()
     docs = _hybrid_retrieve(question)
     return {
         "answer": "",
         "contexts": [doc.page_content for doc in docs],
-        "sources": [doc.metadata.get("source", doc.metadata.get("filename", "")) for doc in docs],
+        "sources": [_source_label(doc) for doc in docs],
     }
 
 
@@ -111,7 +164,7 @@ def query(question: str) -> dict:
     return {
         "answer": answer,
         "contexts": [doc.page_content for doc in docs],
-        "sources": [doc.metadata.get("source", doc.metadata.get("filename", "")) for doc in docs],
+        "sources": [_source_label(doc) for doc in docs],
     }
 
 
