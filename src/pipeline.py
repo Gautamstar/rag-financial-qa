@@ -21,7 +21,6 @@ LM_STUDIO_MODEL = os.getenv("LM_STUDIO_MODEL", "google/gemma-4-26b-a4b")
 TOP_K = 4
 RRF_K = 60
 
-# Maps common company names to their tickers for better BM25 matching
 COMPANY_ALIASES = {
     "jpmorgan": "jpm",
     "jp morgan": "jpm",
@@ -36,13 +35,13 @@ COMPANY_ALIASES = {
 }
 
 _PROMPT = PromptTemplate(
-    input_variables=["context", "question"],
+    input_variables=["context", "question", "chat_history"],
     template="""Use the following excerpts from financial documents to answer the question.
 If the answer is not in the context, say "I don't have enough information to answer this."
 
 Context:
 {context}
-
+{chat_history}
 Question: {question}
 
 Answer:""",
@@ -55,7 +54,6 @@ _llm_chain = None
 
 
 def _normalize_query(question: str) -> str:
-    """Expand company names to tickers so BM25 matches filing text."""
     q = question.lower()
     for name, ticker in COMPANY_ALIASES.items():
         if name in q:
@@ -65,6 +63,25 @@ def _normalize_query(question: str) -> str:
 
 def _doc_key(doc: Document) -> str:
     return hashlib.md5(doc.page_content.encode()).hexdigest()
+
+
+def _format_chat_history(history: list[dict] | None) -> str:
+    if not history:
+        return ""
+    lines = ["\nPrevious conversation:"]
+    for msg in history:
+        role = msg.get("role", "user").capitalize()
+        lines.append(f"{role}: {msg['content']}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _filter_by_company(docs: list[Document], company_filter: list[str] | None) -> list[Document]:
+    if not company_filter:
+        return docs
+    tickers = {c.upper() for c in company_filter}
+    filtered = [d for d in docs if d.metadata.get("ticker", "").upper() in tickers]
+    return filtered if filtered else docs
 
 
 def _load():
@@ -99,8 +116,11 @@ def _load():
     _llm_chain = _PROMPT | llm | StrOutputParser()
 
 
-def _hybrid_retrieve(question: str, k: int = TOP_K) -> list[Document]:
-    """Reciprocal Rank Fusion over FAISS (semantic) + BM25 (keyword) results."""
+def _hybrid_retrieve(
+    question: str,
+    k: int = TOP_K,
+    company_filter: list[str] | None = None,
+) -> list[Document]:
     n_candidates = k * 10
     normalized = _normalize_query(question)
 
@@ -127,14 +147,16 @@ def _hybrid_retrieve(question: str, k: int = TOP_K) -> list[Document]:
     for rank, doc in enumerate(bm25_results):
         key = _doc_key(doc)
         if key in rrf_scores:
-            # Already found by FAISS — tag as both
             doc_map[key].metadata["_retriever"] = "FAISS+BM25"
         else:
             doc_map[key] = doc
         rrf_scores[key] = rrf_scores.get(key, 0) + 1 / (RRF_K + rank + 1)
 
     ranked = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
-    return [doc_map[key] for key in ranked[:k]]
+    top_docs = [doc_map[key] for key in ranked]
+
+    filtered = _filter_by_company(top_docs, company_filter)
+    return filtered[:k]
 
 
 def _format_docs(docs: list[Document]) -> str:
@@ -147,9 +169,12 @@ def _source_label(doc: Document) -> str:
     return f"{source} [{retriever}]" if retriever else source
 
 
-def retrieve(question: str) -> dict:
+def retrieve(
+    question: str,
+    company_filter: list[str] | None = None,
+) -> dict:
     _load()
-    docs = _hybrid_retrieve(question)
+    docs = _hybrid_retrieve(question, company_filter=company_filter)
     return {
         "answer": "",
         "contexts": [doc.page_content for doc in docs],
@@ -157,10 +182,19 @@ def retrieve(question: str) -> dict:
     }
 
 
-def query(question: str) -> dict:
+def query(
+    question: str,
+    chat_history: list[dict] | None = None,
+    company_filter: list[str] | None = None,
+) -> dict:
     _load()
-    docs = _hybrid_retrieve(question)
-    answer = _llm_chain.invoke({"context": _format_docs(docs), "question": question})
+    docs = _hybrid_retrieve(question, company_filter=company_filter)
+    history_text = _format_chat_history(chat_history)
+    answer = _llm_chain.invoke({
+        "context": _format_docs(docs),
+        "question": question,
+        "chat_history": history_text,
+    })
     return {
         "answer": answer,
         "contexts": [doc.page_content for doc in docs],
@@ -168,8 +202,17 @@ def query(question: str) -> dict:
     }
 
 
-def stream_query(question: str):
+def stream_query(
+    question: str,
+    chat_history: list[dict] | None = None,
+    company_filter: list[str] | None = None,
+):
     _load()
-    docs = _hybrid_retrieve(question)
-    for chunk in _llm_chain.stream({"context": _format_docs(docs), "question": question}):
+    docs = _hybrid_retrieve(question, company_filter=company_filter)
+    history_text = _format_chat_history(chat_history)
+    for chunk in _llm_chain.stream({
+        "context": _format_docs(docs),
+        "question": question,
+        "chat_history": history_text,
+    }):
         yield chunk

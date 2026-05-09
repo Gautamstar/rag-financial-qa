@@ -1,0 +1,11 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+.env
+data/
+vectorstore/
+.DS_Store
+*.egg-info
+.venv
+venv

@@ -88,10 +88,28 @@ vectorstore/  FAISS index (not committed)
 
 ---
 
-## What's next
+## Features
 
-- Hybrid search (BM25 + FAISS) to improve retrieval on exact company/ticker names
-- RAGAS metrics panel in the UI
-- Conversational memory for follow-up questions
-- Company filter in the sidebar
-- Azure deployment config
+- **Hybrid search** — BM25 + FAISS with reciprocal rank fusion for better keyword + semantic retrieval
+- **Company filter** — sidebar multiselect to restrict retrieval to specific filings
+- **Conversational memory** — chat history is injected into each prompt so follow-up questions work naturally
+- **RAGAS metrics panel** — run faithfulness + answer relevancy evaluation from the sidebar
+- **Docker** — `docker-compose up` spins up the API and Streamlit app together
+
+---
+
+## Docker
+
+Build and run both services:
+
+```bash
+docker-compose up --build
+```
+
+The API runs on port 8000 and the UI on 8501. Mount your pre-built vectorstore at `./vectorstore` (the container sees it read-only).
+
+To build the vectorstore before containerizing:
+
+```bash
+python src/ingest.py
+```

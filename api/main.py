@@ -9,14 +9,26 @@ from src.pipeline import stream_query, query as rag_query, retrieve
 app = FastAPI(title="Financial RAG Q&A")
 
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
 class QueryRequest(BaseModel):
     question: str
+    chat_history: list[ChatMessage] | None = None
+    company_filter: list[str] | None = None
 
 
 class QueryResponse(BaseModel):
     answer: str
     contexts: list[str]
     sources: list[str]
+
+
+class MetricsResponse(BaseModel):
+    faithfulness: float | None = None
+    answer_relevancy: float | None = None
 
 
 @app.get("/health")
@@ -28,7 +40,8 @@ def health():
 def query(req: QueryRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
-    result = rag_query(req.question)
+    history = [m.model_dump() for m in req.chat_history] if req.chat_history else None
+    result = rag_query(req.question, chat_history=history, company_filter=req.company_filter)
     return QueryResponse(**result)
 
 
@@ -36,12 +49,30 @@ def query(req: QueryRequest):
 def query_stream(req: QueryRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
-    return StreamingResponse(stream_query(req.question), media_type="text/plain")
+    history = [m.model_dump() for m in req.chat_history] if req.chat_history else None
+    return StreamingResponse(
+        stream_query(req.question, chat_history=history, company_filter=req.company_filter),
+        media_type="text/plain",
+    )
 
 
 @app.post("/retrieve", response_model=QueryResponse)
 def retrieve_sources(req: QueryRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
-    result = retrieve(req.question)
+    result = retrieve(req.question, company_filter=req.company_filter)
     return QueryResponse(**result)
+
+
+@app.post("/metrics", response_model=MetricsResponse)
+def run_metrics():
+    """Run RAGAS evaluation over the built-in eval set. Takes several minutes."""
+    from src.evaluate import run_evaluation
+    result = run_evaluation()
+    df = result.to_pandas()
+    scores = {}
+    if "faithfulness" in df.columns:
+        scores["faithfulness"] = round(float(df["faithfulness"].mean()), 4)
+    if "answer_relevancy" in df.columns:
+        scores["answer_relevancy"] = round(float(df["answer_relevancy"].mean()), 4)
+    return MetricsResponse(**scores)
