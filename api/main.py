@@ -18,6 +18,8 @@ class QueryRequest(BaseModel):
     question: str
     chat_history: list[ChatMessage] | None = None
     company_filter: list[str] | None = None
+    temperature: float = 0.0
+    top_k: int = 4
 
 
 class QueryResponse(BaseModel):
@@ -41,7 +43,13 @@ def query(req: QueryRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
     history = [m.model_dump() for m in req.chat_history] if req.chat_history else None
-    result = rag_query(req.question, chat_history=history, company_filter=req.company_filter)
+    result = rag_query(
+        req.question,
+        chat_history=history,
+        company_filter=req.company_filter,
+        temperature=req.temperature,
+        top_k=req.top_k,
+    )
     return QueryResponse(**result)
 
 
@@ -51,7 +59,13 @@ def query_stream(req: QueryRequest):
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
     history = [m.model_dump() for m in req.chat_history] if req.chat_history else None
     return StreamingResponse(
-        stream_query(req.question, chat_history=history, company_filter=req.company_filter),
+        stream_query(
+            req.question,
+            chat_history=history,
+            company_filter=req.company_filter,
+            temperature=req.temperature,
+            top_k=req.top_k,
+        ),
         media_type="text/plain",
     )
 
@@ -60,7 +74,7 @@ def query_stream(req: QueryRequest):
 def retrieve_sources(req: QueryRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
-    result = retrieve(req.question, company_filter=req.company_filter)
+    result = retrieve(req.question, company_filter=req.company_filter, top_k=req.top_k)
     return QueryResponse(**result)
 
 

@@ -1,0 +1,157 @@
+RAG Financial Q&A — Future Steps & Enhancements
+=================================================
+Last updated: 2026-05-13
+
+
+RETRIEVAL QUALITY
+-----------------
+1. Cross-encoder re-ranking
+   Add a cross-encoder (cross-encoder/ms-marco-MiniLM-L-6-v2) after RRF retrieval.
+   Score each (query, chunk) pair jointly and re-order before the LLM sees them.
+   ~50 lines in pipeline.py. Highest single impact improvement.
+
+2. Section-aware chunking
+   ingest.py uses a flat RecursiveCharacterTextSplitter(chunk_size=512) on the full
+   10-K text. SEC filings have clear sections (Item 1A: Risk Factors, Item 7: MD&A,
+   Item 8: Financial Statements, etc.). Split by section header first, then chunk
+   within each section. Store section name in chunk metadata for better source labels.
+
+3. Query rewriting / HyDE
+   Before retrieval, rewrite or expand the user query using the LLM to improve recall
+   on vague or short questions. HyDE (Hypothetical Document Embedding) generates a
+   fake answer passage and embeds that instead of the raw query.
+
+4. Dynamic TOP_K
+   Currently TOP_K is hardcoded to 4. Experiment with larger k (8-10) combined with
+   re-ranking to avoid dropping relevant chunks early.
+
+5. MMR (Maximal Marginal Relevance)
+   Replace or complement similarity_search with FAISS MMR to reduce redundant chunks
+   and increase diversity of retrieved context.
+
+
+EVALUATION
+----------
+6. Add ContextRecall metric
+   README promises context recall but evaluate.py only computes faithfulness and
+   answer_relevancy. data/ has train.json, test.json, dev.json — wire ground-truth
+   answers from those files into RAGAS ContextRecall and AnswerCorrectness metrics.
+
+7. Cache evaluation results
+   The sidebar "Run Evaluation" button fires a 15-minute RAGAS run every click with
+   no caching. Save results to a JSON file with a timestamp; skip re-running if cache
+   is fresh (e.g., < 24 hours old). Show the cached result with the run timestamp.
+
+8. Per-company eval breakdown
+   Run RAGAS metrics separately for each ticker so you can see which filings retrieve
+   well vs. poorly.
+
+
+DATA COVERAGE
+-------------
+9. Add more years of filings
+   Currently only one 10-K per company (most recent). Add 2-3 prior years per company
+   to support year-over-year comparison questions.
+
+10. Add 10-Q quarterly filings
+    download_sec.py only fetches 10-K. Add 10-Q support to answer questions about
+    quarterly revenue, guidance, and recent events.
+
+11. Expand company coverage
+    Add more S&P 500 financials: Wells Fargo, Morgan Stanley, Berkshire Hathaway,
+    Chubb, Travelers, Allstate. Update COMPANY_ALIASES and COMPANIES dict accordingly.
+
+12. Earnings call transcripts
+    Supplement SEC filings with earnings call transcripts (available via SEC EDGAR
+    8-K filings or third-party sources) to answer forward-looking questions.
+
+
+ARCHITECTURE
+------------
+13. Async pipeline
+    pipeline.py uses synchronous calls. Switch to async LangChain + async FastAPI
+    handlers to handle concurrent requests without blocking.
+
+14. Persistent vector store
+    FAISS is loaded into memory on cold start. For production, swap to a persistent
+    vector database (Chroma, Qdrant, or pgvector) to support incremental updates
+    without rebuilding the entire index.
+
+15. Incremental ingestion
+    ingest.py rebuilds everything from scratch. Track which filings are already
+    indexed (e.g., via accession number in a manifest file) and only process new ones.
+
+16. Embedding model upgrade
+    all-MiniLM-L6-v2 is fast but small. Benchmark against larger models:
+    BAAI/bge-large-en-v1.5, intfloat/e5-large-v2, or OpenAI text-embedding-3-small.
+
+
+FEATURES
+--------
+17. Table extraction
+    SEC 10-Ks have dense financial tables (income statement, balance sheet). The
+    current HTML-to-text conversion flattens tables into unstructured text. Add a
+    table-aware parser (e.g., pandas read_html or camelot for PDFs) to preserve
+    row/column structure.
+
+18. Citation highlighting
+    In the Streamlit UI, highlight the exact sentence or phrase in the source chunk
+    that supports the answer, rather than showing the whole 600-char excerpt.
+
+19. Comparison queries
+    Detect when the user asks to compare two companies (e.g., "How does JPM's revenue
+    compare to GS?") and retrieve top-k chunks from each company separately, then
+    synthesize a combined answer.
+
+20. Follow-up question suggestions
+    After each answer, suggest 2-3 relevant follow-up questions based on the retrieved
+    context. Small UX improvement that showcases the model's understanding.
+
+21. Export / share answers
+    Add a button to export the current conversation (questions, answers, sources) as
+    a PDF or markdown file.
+
+
+INFRASTRUCTURE & QUALITY
+-------------------------
+22. Add tests
+    Zero tests currently exist. Minimum viable test suite:
+    - test_ingest.py: verify chunking produces expected chunk count and metadata
+    - test_pipeline.py: load vectorstore, assert known question returns correct ticker
+    - test_api.py: FastAPI TestClient smoke tests for /query, /retrieve, /health
+
+23. GitHub Actions CI
+    Add a workflow that runs linting (ruff) and the test suite on every push/PR.
+
+24. Structured logging
+    Replace print() statements throughout ingest.py and pipeline.py with Python
+    logging (structlog or stdlib logging) with log levels. Makes Docker log aggregation
+    usable.
+
+25. .env.example
+    README references .env.example but the file is not in the repo. Add it with
+    documented placeholders for LM_STUDIO_BASE_URL and LM_STUDIO_MODEL.
+
+26. API authentication
+    The FastAPI backend has no auth. Add a simple API key header check (X-API-Key)
+    before exposing to any non-local environment.
+
+27. Rate limiting
+    Add slowapi rate limiting to the /query/stream endpoint to prevent abuse if the
+    API is ever exposed beyond localhost.
+
+
+MODEL / LLM
+-----------
+28. Model switcher in UI
+    Add a sidebar dropdown to switch between locally available LM Studio models
+    without restarting the API. Read available models from the LM Studio /v1/models
+    endpoint.
+
+29. Prompt versioning
+    The system prompt in pipeline.py is a raw string. Move prompts to a prompts/
+    directory as versioned text files so changes are tracked separately from code.
+
+30. Temperature control in UI
+    Expose a temperature slider in the Streamlit sidebar so users can tune
+    creativity vs. precision per session.

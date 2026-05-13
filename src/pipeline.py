@@ -18,7 +18,8 @@ VECTORSTORE_DIR = Path("vectorstore")
 BM25_CACHE = VECTORSTORE_DIR / "bm25.pkl"
 LM_STUDIO_URL = os.getenv("LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
 LM_STUDIO_MODEL = os.getenv("LM_STUDIO_MODEL", "google/gemma-4-26b-a4b")
-TOP_K = 4
+DEFAULT_TEMPERATURE = float(os.getenv("LM_STUDIO_TEMPERATURE", "0.0"))
+DEFAULT_TOP_K = int(os.getenv("TOP_K", "4"))
 RRF_K = 60
 
 COMPANY_ALIASES = {
@@ -50,7 +51,7 @@ Answer:""",
 _faiss = None
 _bm25 = None
 _bm25_docs = None
-_llm_chain = None
+_indexes_loaded = False
 
 
 def _normalize_query(question: str) -> str:
@@ -85,8 +86,8 @@ def _filter_by_company(docs: list[Document], company_filter: list[str] | None) -
 
 
 def _load():
-    global _faiss, _bm25, _bm25_docs, _llm_chain
-    if _llm_chain is not None:
+    global _faiss, _bm25, _bm25_docs, _indexes_loaded
+    if _indexes_loaded:
         return
 
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
@@ -107,18 +108,22 @@ def _load():
         with open(BM25_CACHE, "wb") as f:
             pickle.dump(_bm25, f)
 
+    _indexes_loaded = True
+
+
+def _make_chain(temperature: float = DEFAULT_TEMPERATURE):
     llm = ChatOpenAI(
         base_url=LM_STUDIO_URL,
         api_key="lm-studio",
         model=LM_STUDIO_MODEL,
-        temperature=0,
+        temperature=temperature,
     )
-    _llm_chain = _PROMPT | llm | StrOutputParser()
+    return _PROMPT | llm | StrOutputParser()
 
 
 def _hybrid_retrieve(
     question: str,
-    k: int = TOP_K,
+    k: int = DEFAULT_TOP_K,
     company_filter: list[str] | None = None,
 ) -> list[Document]:
     n_candidates = k * 10
@@ -172,9 +177,10 @@ def _source_label(doc: Document) -> str:
 def retrieve(
     question: str,
     company_filter: list[str] | None = None,
+    top_k: int = DEFAULT_TOP_K,
 ) -> dict:
     _load()
-    docs = _hybrid_retrieve(question, company_filter=company_filter)
+    docs = _hybrid_retrieve(question, k=top_k, company_filter=company_filter)
     return {
         "answer": "",
         "contexts": [doc.page_content for doc in docs],
@@ -186,11 +192,14 @@ def query(
     question: str,
     chat_history: list[dict] | None = None,
     company_filter: list[str] | None = None,
+    temperature: float = DEFAULT_TEMPERATURE,
+    top_k: int = DEFAULT_TOP_K,
 ) -> dict:
     _load()
-    docs = _hybrid_retrieve(question, company_filter=company_filter)
+    docs = _hybrid_retrieve(question, k=top_k, company_filter=company_filter)
     history_text = _format_chat_history(chat_history)
-    answer = _llm_chain.invoke({
+    chain = _make_chain(temperature)
+    answer = chain.invoke({
         "context": _format_docs(docs),
         "question": question,
         "chat_history": history_text,
@@ -206,11 +215,14 @@ def stream_query(
     question: str,
     chat_history: list[dict] | None = None,
     company_filter: list[str] | None = None,
+    temperature: float = DEFAULT_TEMPERATURE,
+    top_k: int = DEFAULT_TOP_K,
 ):
     _load()
-    docs = _hybrid_retrieve(question, company_filter=company_filter)
+    docs = _hybrid_retrieve(question, k=top_k, company_filter=company_filter)
     history_text = _format_chat_history(chat_history)
-    for chunk in _llm_chain.stream({
+    chain = _make_chain(temperature)
+    for chunk in chain.stream({
         "context": _format_docs(docs),
         "question": question,
         "chat_history": history_text,

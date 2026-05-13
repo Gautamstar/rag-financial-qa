@@ -27,6 +27,25 @@ with st.sidebar:
     company_filter = [COMPANIES[c] for c in selected_companies] if selected_companies else None
 
     st.divider()
+    st.header("Generation")
+    temperature = st.slider(
+        "Temperature",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.0,
+        step=0.05,
+        help="Higher = more creative answers. Lower = more deterministic.",
+    )
+    top_k = st.slider(
+        "Retrieved chunks",
+        min_value=2,
+        max_value=10,
+        value=4,
+        step=1,
+        help="Number of document passages retrieved per query.",
+    )
+
+    st.divider()
     st.header("Evaluation")
     st.caption("Runs RAGAS faithfulness + answer relevancy over 10 built-in questions. Takes several minutes.")
     if st.button("Run Evaluation", use_container_width=True):
@@ -87,7 +106,7 @@ if question:
             # Retrieve source passages first (no LLM call)
             sources_res = requests.post(
                 f"{API_URL}/retrieve",
-                json={"question": question, "company_filter": company_filter},
+                json={"question": question, "company_filter": company_filter, "top_k": top_k},
                 timeout=30,
             )
             sources_res.raise_for_status()
@@ -100,6 +119,8 @@ if question:
                     "question": question,
                     "chat_history": api_history or None,
                     "company_filter": company_filter,
+                    "temperature": temperature,
+                    "top_k": top_k,
                 },
                 stream=True,
                 timeout=300,
