@@ -1,115 +1,100 @@
 # Financial Document Q&A
 
-A RAG pipeline that lets you ask natural language questions over real SEC 10-K filings. Built it to get hands-on with retrieval-augmented generation using actual financial data rather than toy datasets.
+Ask plain English questions about real SEC 10-K filings and get answers with the source passages behind them. I built this to work through retrieval-augmented generation on actual financial documents instead of a toy dataset.
 
-Currently indexes annual reports from JPMorgan, Goldman Sachs, MetLife, Prudential, and AIG. Runs fully local — no OpenAI, no cloud LLM calls.
+Indexes annual reports from JPMorgan, Goldman Sachs, MetLife, Prudential, and AIG, about 21k chunks across ten filings. Runs entirely on your machine: no OpenAI key, no cloud LLM calls, and evaluation costs nothing to re-run.
 
----
+## Features
+
+- **Hybrid retrieval.** BM25 and FAISS both run on every query, merged with reciprocal rank fusion.
+- **Company filter.** Sidebar multiselect scopes a question to specific issuers.
+- **Conversational memory.** Previous turns are folded into the prompt, so follow-up questions keep context.
+- **Streaming answers.** Tokens render as they arrive rather than after the full generation.
+- **RAGAS panel.** Run faithfulness and answer relevancy from the sidebar and see the scores in the UI.
+- **Docker.** `docker compose up` brings up the API and the UI together.
 
 ## How it works
 
-Questions go through three steps:
+Retrieval is hybrid because neither method is enough alone. FAISS handles semantic similarity, which works for something like "what are the main liquidity risks" but tends to miss exact ticker symbols. BM25 catches those literal matches but has no sense of meaning. Both retrieve 40 candidates, and the two rankings are merged with reciprocal rank fusion, so a passage that does reasonably well on both outranks one that spikes on a single method. The top 4 survive into the prompt.
 
-1. The query gets embedded using `all-MiniLM-L6-v2` and matched against a FAISS index of chunked 10-K text
-2. The top 4 passages get stuffed into a prompt
-3. Gemma 4 (running locally via LM Studio) generates the answer
+There's a small company-name-to-ticker map in front of BM25, since a question about "Goldman" needs to match filing text that says "GS".
 
-The answer streams back token by token so you're not just staring at a spinner waiting for a 26B model.
+Passages carry a tag showing which retriever found them, `FAISS`, `BM25`, or both, which makes it obvious when the two methods agree.
 
-Evaluation is done with RAGAS — faithfulness, answer relevancy, and context recall — using the ground truth Q&A pairs from the dataset.
+The company filter is applied to the fused ranking rather than to each retriever, and falls back to unfiltered results if the filter would leave nothing. Worth knowing: if the selected issuer appears nowhere in the 40 candidates from either retriever, you get results from other companies instead of an empty answer.
 
----
+Generation runs against whatever model you have loaded in LM Studio, at temperature 0.
 
 ## Stack
 
-- **LangChain** (LCEL) for the retrieval chain
-- **FAISS** for vector search
-- **sentence-transformers** for embeddings
-- **FastAPI** for the backend
-- **Streamlit** for the frontend
-- **RAGAS** for evaluation
-- **LM Studio** for running Gemma 4 locally
-
----
+LangChain (LCEL) for the chain, FAISS plus `rank_bm25` for retrieval, `all-MiniLM-L6-v2` for embeddings, FastAPI for the backend, Streamlit for the UI, RAGAS for evaluation, LM Studio to serve the model.
 
 ## Setup
 
-**Requirements:** Python 3.10+, LM Studio running locally with `google/gemma-4-26b-a4b` loaded
+Needs Python 3.10+ and LM Studio running locally with a model loaded.
 
 ```bash
 pip install -r requirements.txt
+cp .env.example .env          # point LM_STUDIO_BASE_URL at your instance
+python src/download_sec.py    # pull filings from SEC EDGAR
+python src/ingest.py          # chunk, embed, build the FAISS and BM25 indexes
 ```
 
-Download SEC filings:
-```bash
-python src/download_sec.py
-```
+Then start the two services in separate terminals:
 
-Build the FAISS index:
-```bash
-python src/ingest.py
-```
-
-Start the API and frontend in separate terminals:
 ```bash
 uvicorn api.main:app --reload
 streamlit run app/streamlit_app.py
 ```
 
-Copy `.env.example` to `.env` and update `LM_STUDIO_BASE_URL` if your LM Studio isn't on the default port.
+## Docker
 
----
+```bash
+python src/ingest.py          # build the vectorstore on the host first
+docker compose up --build
+```
+
+API on 8000, UI on 8501. Both services share one image, and `vectorstore/` is mounted read only. The Streamlit container finds the API through the `API_URL` env var, so it resolves by service name rather than localhost.
 
 ## Evaluation
 
-Runs RAGAS metrics on 10 samples from the dev set:
+From the sidebar, hit **Run Evaluation** to score faithfulness and answer relevancy in the UI. Takes a few minutes, since every question goes through the full pipeline.
+
+From the command line:
 
 ```bash
 python src/evaluate.py
 ```
 
-Outputs faithfulness, answer relevancy, and context recall scores. Uses the same local LM Studio model so no external API calls.
+Same metrics plus context recall, scored against the ground truth Q&A pairs in the dev set. Everything runs through the local model, so there's no API bill for evaluating.
 
----
+## API
 
-## Project structure
+| Endpoint | Purpose |
+| :--- | :--- |
+| `POST /query` | Answer with contexts and sources |
+| `POST /query/stream` | Same, streamed token by token |
+| `POST /retrieve` | Retrieval only, no LLM call |
+| `POST /metrics` | Run RAGAS and return scores |
+| `GET /health` | Liveness check |
+
+`/query` and `/query/stream` accept optional `chat_history` and `company_filter`.
+
+## Layout
 
 ```
-api/          FastAPI backend
-app/          Streamlit frontend
-src/
-  download_sec.py   pulls 10-K filings from SEC EDGAR
-  ingest.py         chunks + embeds + builds FAISS index
-  pipeline.py       RAG chain
-  evaluate.py       RAGAS evaluation
-data/         SEC filings (not committed)
-vectorstore/  FAISS index (not committed)
+api/     FastAPI backend
+app/     Streamlit frontend
+src/     download_sec.py  pulls 10-Ks from EDGAR
+         ingest.py        chunks, embeds, builds both indexes
+         pipeline.py      hybrid retrieval, RRF, generation
+         evaluate.py      RAGAS metrics
 ```
 
----
+`data/` and `vectorstore/` are generated by the setup steps and aren't committed.
 
-## Features
+## What's next
 
-- **Hybrid search** — BM25 + FAISS with reciprocal rank fusion for better keyword + semantic retrieval
-- **Company filter** — sidebar multiselect to restrict retrieval to specific filings
-- **Conversational memory** — chat history is injected into each prompt so follow-up questions work naturally
-- **RAGAS metrics panel** — run faithfulness + answer relevancy evaluation from the sidebar
-- **Docker** — `docker-compose up` spins up the API and Streamlit app together
-
----
-
-## Docker
-
-Build and run both services:
-
-```bash
-docker-compose up --build
-```
-
-The API runs on port 8000 and the UI on 8501. Mount your pre-built vectorstore at `./vectorstore` (the container sees it read-only).
-
-To build the vectorstore before containerizing:
-
-```bash
-python src/ingest.py
-```
+- Filter per retriever instead of post-fusion, so a narrow company filter can't fall back to other issuers
+- Cite passages inline in the answer rather than only listing them underneath
+- Deployment config for Azure
